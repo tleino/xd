@@ -1,5 +1,19 @@
-xd
-==
+xd - eXtensible eDitor
 
-xd is an eXtensible eDitor inspired by Unix ed(1).
+xd is inspired by Unix ed(1), that can be used as a line-based user
+interface for programs that take simple commands from standard input
+and/or provide output on standard output.
 
+At the moment xd is work in progress and is not yet able to perform
+its function.
+
+Configure & Install
+===================
+
+./configure ~
+make install
+
+See also
+========
+
+https://github.com/tleino/gemsurf/
