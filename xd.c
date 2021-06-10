@@ -303,6 +303,16 @@ parseuser(char *ibuf, struct xd *xd)
 		printlns(&xd->dot, xd->end,
 		    (c == 'n') ? (flags | CF_NUMBERED) : flags, xd->vb);
 		break;
+	case 'e':
+		ibuf++;
+		while (isspace(*ibuf))
+			ibuf++;
+		viewbuf_free(xd->vb);
+		memset(xd->vb, 0, sizeof(struct viewbuf));
+		xd->dot = 1;
+		readfile(ibuf, xd->vb);
+		printf("%d\n", VIEWBUF_NBYTES(xd->vb));
+		break;
 	case '\0':
 		printlns(&xd->dot, xd->dot, 0, xd->vb);
 		break;
@@ -353,6 +363,6 @@ main(int argc, char *argv[])
 
 	readuser(&xd);
 
-	viewbuf_free(vb);
+	viewbuf_free(xd.vb);
 	return 0;
 }
