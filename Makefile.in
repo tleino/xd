@@ -12,7 +12,7 @@ mandir = $(datarootdir)/man
 INSTALL ?= install
 INSTALLFLAGS ?= -D
 
-SRCS=xd.c viewbuf.c
+SRCS=xd.c linebuf.c viewbuf.c
 PROG=xd
 MAN=xd.1
 
@@ -37,3 +37,6 @@ install: $(PROG)
 uninstall:
 	rm -f $(DESTDIR)$(bindir)/$(PROG)
 	rm -f $(DESTDIR)$(mandirdir)/man1/$(MAN)
+linebuf.o: linebuf.c linebuf.h
+viewbuf.o: viewbuf.c viewbuf.h
+xd.o: xd.c viewbuf.h

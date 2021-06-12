@@ -1,4 +1,5 @@
 #include "viewbuf.h"
+#include "linebuf.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,9 @@
 #include <ctype.h>
 #include <regex.h>
 #include <limits.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <stdarg.h>
 
 struct xd {
 	/* address range */
@@ -17,22 +21,43 @@ struct xd {
 	int dot;
 
 	struct viewbuf *vb;
+
+	/* active command */
+	int read_fd;
+	int write_fd;
+	char *prompt;
+
+	/* plugin support */
+	char *plugin_cmd;
+	char *plugin_re;
 };
 
 int erange(char **, struct xd *);
 int nextaddr(char **, int, int, struct viewbuf *);
 void parseuser(char *, struct xd *);
-void readuser(struct xd *);
+void readuser(struct xd *, FILE *);
 
 static void readfile(const char *, struct viewbuf *);
+static void runcmd(const char *, const char *, struct xd *);
+
+static struct viewbuf		*read_refresh(struct viewbuf *, const char *,
+				    int);
+static void			 read_reply(const char *, int);
+
+static void			 write_fd(int fd, const char *s, ...);
 
 static char errmsg[PATH_MAX + 128];
 
 static void
 seterrmsg(const char *s)
 {
+#ifdef __OpenBSD__
 	if (strlcpy(errmsg, s, sizeof(errmsg)) >= sizeof(errmsg))
 		warnx("truncated errmsg");
+#else
+	if (snprintf(errmsg, sizeof(errmsg), "%s", s) >= sizeof(errmsg))
+		warnx("truncated errmsg");
+#endif
 }
 
 static void
@@ -58,6 +83,112 @@ readfile(const char *file, struct viewbuf *vb)
 	if (ferror(fp))
 		err(1, "getline");
 	fclose(fp);
+
+	printf("%d\n", VIEWBUF_NBYTES(vb));
+}
+
+static struct viewbuf *
+read_refresh(struct viewbuf *vb, const char *prompt, int fd)
+{
+	struct linebuf *lb;
+	char *s;
+
+	lb = linebuf_create();
+	
+	vb = viewbuf_create();
+
+	while (linebuf_fill_from_fd(lb, fd) > 0) {
+		while ((s = linebuf_read(lb)) != NULL)
+			viewbuf_add(vb, s, s);
+		if (s == NULL && linebuf_get_partial(lb) != NULL)
+			if (strcmp(prompt, linebuf_get_partial(lb)) == 0)
+				break;
+	}
+
+	linebuf_free(lb);
+
+	printf("%d\n", VIEWBUF_NBYTES(vb));
+
+	return vb;
+}
+
+static void
+read_reply(const char *prompt, int fd)
+{
+	struct linebuf *lb;
+	char *s;
+
+	lb = linebuf_create();
+	
+	while (linebuf_fill_from_fd(lb, fd) > 0) {
+		while ((s = linebuf_read(lb)) != NULL)
+			puts(s);
+		if (s == NULL && linebuf_get_partial(lb) != NULL)
+			if (strcmp(prompt, linebuf_get_partial(lb)) == 0)
+				break;
+	}
+
+	linebuf_free(lb);
+}
+
+static void
+write_fd(int fd, const char *s, ...)
+{
+	va_list ap;
+	static char buf[1024];
+	ssize_t len;
+
+	va_start(ap, s);
+	len = vsnprintf(buf, sizeof(buf), s, ap);
+	va_end(ap);
+
+	if (len < 0)
+		warn("vsnprintf");
+	else if (len >= sizeof(buf))
+		warnx("vsnprintf: truncated");
+	else if (len > 0)
+		write(fd, buf, len);
+}
+
+static void
+runcmd(const char *cmd, const char *url, struct xd *xd)
+{
+	pid_t pid;
+	int status;
+	int pfds[2];
+	int pfds2[2];
+	uint32_t rnd;
+	static char prompt[32 + 1];
+
+	pipe(pfds);
+	pipe(pfds2);
+
+#ifdef __OpenBSD__
+	rnd = arc4random();
+#else
+	rnd = rand();
+#endif
+	snprintf(prompt, sizeof(prompt), "%x", rnd);
+
+	pid = fork();
+
+	if (pid == 0) {
+		dup2(pfds[1], 1);
+		dup2(pfds2[0], 0);
+		close(pfds[0]);
+		execlp(cmd, cmd, "-p", prompt, url, NULL);
+		warn("execlp");
+		_exit(127);
+	} else {
+		close(pfds[1]);
+		close(pfds2[0]);
+	}
+
+	xd->write_fd = pfds2[1];
+	xd->read_fd = pfds[0];
+	xd->prompt = prompt;
+
+	xd->vb = read_refresh(NULL, prompt, xd->read_fd);
 }
 
 /*
@@ -126,6 +257,27 @@ final:
 	return -1;
 }
 
+int
+matchstr(const char *s, const char *re)
+{
+	regmatch_t pmatch;
+	regex_t cre;
+	int e;
+
+	if ((e = regcomp(&cre, re, 0)) != 0)
+		goto error;
+	if ((e = regexec(&cre, s, 1, &pmatch, 0)) == REG_NOMATCH) {
+		regfree(&cre);
+		goto error;
+	}
+
+	regfree(&cre);
+	return 1;
+
+error:
+	return 0;
+}
+
 /*
  * extract address range
  *
@@ -136,6 +288,9 @@ erange(char **ibuf, struct xd *xd)
 {
 	int begin, end, last;
 	int addrcnt;
+
+	if (xd->vb == NULL)
+		goto error;
 
 	addrcnt = 0;
 	last = VIEWBUF_NLINES(xd->vb);
@@ -278,6 +433,42 @@ parseuser(char *ibuf, struct xd *xd)
 	int i, addrcnt;
 	int flags = 0;
 	char c;
+	char *p, *begin;
+
+	if (strncmp(ibuf, "plugin", strlen("plugin")) == 0) {
+		p = begin = ibuf + strlen("plugin") + 1;
+		while (!isspace(*p) && *p != '\0')
+			p++;
+		*p = '\0';
+		xd->plugin_cmd = strdup(begin);
+		p++;
+		while (isspace(*p))
+			p++;
+		begin = p;
+		while (!isspace(*p) && *p != '\0')
+			p++;
+		xd->plugin_re = strdup(begin);
+	}
+
+	c = *ibuf;
+
+	switch (c) {
+	case 'h':
+		puts((*errmsg == '\0') ? "no error" : errmsg);
+		return;
+	case 'e':
+		ibuf++;
+		while (isspace(*ibuf))
+			ibuf++;
+		viewbuf_free(xd->vb);
+		xd->vb = NULL;
+		xd->dot = 1;
+		if (xd->plugin_re != NULL && matchstr(ibuf, xd->plugin_re))
+			runcmd(xd->plugin_cmd, ibuf, xd);
+		else
+			readfile(ibuf, xd->vb);
+		return;
+	}
 
 	if ((addrcnt = erange(&ibuf, xd)) < 0) {
 		puts("?");
@@ -285,6 +476,7 @@ parseuser(char *ibuf, struct xd *xd)
 	}
 
 	c = *ibuf;
+
 	switch (c) {
 	case 'p':
 	case 'n':
@@ -295,23 +487,18 @@ parseuser(char *ibuf, struct xd *xd)
 	}
 
 	switch (c) {
-	case 'h':
-		puts((*errmsg == '\0') ? "no error" : errmsg);
-		return;
 	case 'p':
 	case 'n':
 		printlns(&xd->dot, xd->end,
 		    (c == 'n') ? (flags | CF_NUMBERED) : flags, xd->vb);
 		break;
-	case 'e':
-		ibuf++;
-		while (isspace(*ibuf))
-			ibuf++;
-		viewbuf_free(xd->vb);
-		memset(xd->vb, 0, sizeof(struct viewbuf));
-		xd->dot = 1;
-		readfile(ibuf, xd->vb);
-		printf("%d\n", VIEWBUF_NBYTES(xd->vb));
+	case 'x':
+		write_fd(xd->write_fd, "x %d\n", xd->dot);
+		xd->vb = read_refresh(NULL, xd->prompt, xd->read_fd);
+		break;
+	case 'l':
+		write_fd(xd->write_fd, "l %d\n", xd->dot);
+		read_reply(xd->prompt, xd->read_fd);
 		break;
 	case '\0':
 		printlns(&xd->dot, xd->dot, 0, xd->vb);
@@ -324,13 +511,13 @@ parseuser(char *ibuf, struct xd *xd)
 }
 
 void
-readuser(struct xd *xd)
+readuser(struct xd *xd, FILE *fp)
 {
 	char *ibuf = NULL;
 	size_t sz = 0;
 	ssize_t len;
 
-	while ((len = getline(&ibuf, &sz, stdin)) != -1) {
+	while ((len = getline(&ibuf, &sz, fp)) != -1) {
 		ibuf[strcspn(ibuf, "\r\n")] = '\0';
 		parseuser(ibuf, xd);
 	}
@@ -340,10 +527,32 @@ readuser(struct xd *xd)
 		err(1, "getline");
 }
 
+static void
+readconfig(struct xd *xd)
+{
+	FILE *fp;
+	char *home;
+	char file[PATH_MAX + 1];
+
+	home = getenv("HOME");
+	if (home == NULL)
+		home = "/";
+
+	if (snprintf(file, sizeof(file), "%s/.xd", home) >= sizeof(file))
+		return;
+
+	fp = fopen(file, "r");
+	if (fp == NULL)
+		return;
+
+	readuser(xd, fp);
+	fclose(fp);
+}
+
 int
 main(int argc, char *argv[])
 {
-	struct viewbuf *vb;
+	struct viewbuf *vb = NULL;
 	struct xd xd = { 0 };
 	char *file = NULL;
 
@@ -353,15 +562,15 @@ main(int argc, char *argv[])
 		file = argv[1];
 	}
 
-	if (file != NULL) {
+	readconfig(&xd);
+
+	if (file != NULL)
 		readfile(file, vb);
-		printf("%d\n", VIEWBUF_NBYTES(vb));
-	}
 
 	xd.dot = 1;
 	xd.vb = vb;
 
-	readuser(&xd);
+	readuser(&xd, stdin);
 
 	viewbuf_free(xd.vb);
 	return 0;

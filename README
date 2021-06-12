@@ -4,14 +4,36 @@ xd is inspired by Unix ed(1), that can be used as a line-based user
 interface for programs that take simple commands from standard input
 and/or provide output on standard output.
 
-At the moment xd is work in progress and is not yet able to perform
-its function.
+At the moment xd is simply a proof of concept.
 
 Configure & Install
 ===================
 
 ./configure ~
 make install
+
+Example
+=======
+
+# First make the .xd script, which will be executed when starting
+# adding gemsurf as a plugin when opening gemini-URLs
+echo >~/.xd 'plugin gemsurf ^gemini://.*'
+
+# Then
+# 1) start xd,
+# 2) open a gemini page,
+# 3) show lines 1-10
+# 4) find first link from current position,
+# 5) show that line's raw gemtext source code
+# 6) go to the link
+# 7) find first link again
+xd
+e gemini://gemini.circumlunar.space/
+1,10p
+/=
+l
+x
+/=
 
 See also
 ========
