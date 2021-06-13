@@ -413,7 +413,7 @@ printlns(int *dot, int end, int flags, struct viewbuf *vb)
 	const char *s;
 
 	if (end-1 >= VIEWBUF_NLINES(vb)) {
-		seterrmsg("invalid address - should not happen");
+		seterrmsg("end reached");
 		return -1;
 	}
 
@@ -424,7 +424,7 @@ printlns(int *dot, int end, int flags, struct viewbuf *vb)
 		else
 			puts(s);
 	}
-	*dot = i;
+	*dot = end;
 }
 
 void
@@ -434,6 +434,11 @@ parseuser(char *ibuf, struct xd *xd)
 	int flags = 0;
 	char c;
 	char *p, *begin;
+
+	if (*ibuf == '\0') {
+		parseuser("+", xd);
+		return;
+	}
 
 	if (strncmp(ibuf, "plugin", strlen("plugin")) == 0) {
 		p = begin = ibuf + strlen("plugin") + 1;
