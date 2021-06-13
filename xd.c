@@ -33,7 +33,7 @@ struct xd {
 };
 
 int erange(char **, struct xd *);
-int nextaddr(char **, int, int, struct viewbuf *);
+int nextaddr(char **, int, int, int *, struct viewbuf *);
 void parseuser(char *, struct xd *);
 void readuser(struct xd *, FILE *);
 
@@ -47,6 +47,14 @@ static void			 read_reply(const char *, int);
 static void			 write_fd(int fd, const char *s, ...);
 
 static char errmsg[PATH_MAX + 128];
+
+#ifndef MAX
+#define MAX(_x, _y) ((_x) > (_y) ? (_x) : (_y))
+#endif
+
+#ifndef MIN
+#define MIN(_x, _y) ((_x) < (_y) ? (_x) : (_y))
+#endif
 
 static void
 seterrmsg(const char *s)
@@ -288,6 +296,7 @@ erange(char **ibuf, struct xd *xd)
 {
 	int begin, end, last;
 	int addrcnt;
+	int cnt;
 
 	if (xd->vb == NULL)
 		goto error;
@@ -295,15 +304,15 @@ erange(char **ibuf, struct xd *xd)
 	addrcnt = 0;
 	last = VIEWBUF_NLINES(xd->vb);
 	end = -1;
-	if ((begin = nextaddr(ibuf, xd->dot, last, xd->vb)) >= 0) {
-		addrcnt++;
+	if ((begin = nextaddr(ibuf, xd->dot, last, &cnt, xd->vb)) >= 0) {
+		addrcnt += cnt;
 		if (**ibuf == ',') {
 			(*ibuf)++;
 			if ((end = nextaddr(ibuf, begin,
-			    last, xd->vb)) == -1)
+			    last, &cnt, xd->vb)) == -1)
 				goto error;
 			else
-				addrcnt++;
+				addrcnt += cnt;
 		} else
 			end = begin;
 	} else
@@ -318,13 +327,14 @@ error:
 }
 
 int
-nextaddr(char **ibuf, int current, int last, struct viewbuf *vb)
+nextaddr(char **ibuf, int current, int last, int *cnt, struct viewbuf *vb)
 {
 	unsigned char c;
 	int addr, n;
 	int first = 1;
 	regex_t re = { 0 };
 
+	*cnt = 0;
 	addr = current;
 	do {
 		switch ((c = (unsigned char) **ibuf)) {
@@ -335,18 +345,21 @@ nextaddr(char **ibuf, int current, int last, struct viewbuf *vb)
 			else
 				n = 1;
 			addr += (c == '-') ? -n : n;
+			*cnt = 1;
 			break;
 		case '0': case '1': case '2': case '3': case '4':
 		case '5': case '6': case '7': case '8': case '9':
 			if (!first)
 				goto invalid_addr;
 			addr = (int) strtol(*ibuf, ibuf, 10);
+			*cnt = 1;
 			break;
 		case '.': case '$':
 			if (!first)
 				goto invalid_addr;
 			addr = (c == '.') ? current : last;
 			(*ibuf)++;
+			*cnt = 1;
 			break;
 		case '/': case '?':
 			if (!first)
@@ -356,14 +369,18 @@ nextaddr(char **ibuf, int current, int last, struct viewbuf *vb)
 			if ((n = matchln(addr, vb, &re)) < 0)
 				return -1;
 			addr = n;
+			*cnt = 1;
 			break;
 		default:
-			if (addr < 0 || addr >= last)
+			if (addr < 0 || addr > last)
 				goto invalid_addr;
 			return addr;
 		}
 		first = 0;
 	} while (**ibuf != '\0');
+
+	if (addr < 0 || addr > last)
+		goto invalid_addr;
 
 	return addr;
 
@@ -384,6 +401,7 @@ readflags(char **ibuf, int flags)
 	do {
 		switch (**ibuf) {
 		case 'p':
+		case 'z':
 			flags |= CF_PRINT;
 			(*ibuf)++;
 			break;
@@ -411,20 +429,17 @@ printlns(int *dot, int end, int flags, struct viewbuf *vb)
 {
 	int i;
 	const char *s;
+	int last;
 
-	if (end-1 >= VIEWBUF_NLINES(vb)) {
-		seterrmsg("end reached");
-		return -1;
-	}
-
-	for (i = *dot; i <= end; i++) {
+	last = MIN(end, VIEWBUF_NLINES(vb));
+	for (i = *dot; i <= last; i++) {
 		s = viewbuf_get(vb, i-1);
 		if (flags & CF_NUMBERED)
 			printf("%d\t%s\n", i, s);
 		else
 			puts(s);
 	}
-	*dot = end;
+	*dot = last;
 }
 
 void
@@ -483,6 +498,7 @@ parseuser(char *ibuf, struct xd *xd)
 	c = *ibuf;
 
 	switch (c) {
+	case 'z':
 	case 'p':
 	case 'n':
 		if ((flags = readflags(&ibuf, flags)) < 0) {
@@ -492,6 +508,18 @@ parseuser(char *ibuf, struct xd *xd)
 	}
 
 	switch (c) {
+	case 'z':
+		if (addrcnt == 0) {
+			if (xd->dot + 1 <= VIEWBUF_NLINES(xd->vb))
+				xd->dot++;
+			else {
+				seterrmsg("end reached");
+				puts("?");
+				return;
+			}
+		}
+		printlns(&xd->dot, xd->end + 20, flags, xd->vb);
+		break;
 	case 'p':
 	case 'n':
 		printlns(&xd->dot, xd->end,
